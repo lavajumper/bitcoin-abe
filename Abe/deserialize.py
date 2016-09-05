@@ -78,10 +78,12 @@ def deserialize_TxOut(d, owner_keys=None):
     else: result += " Own: False"
   return result
 
-def parse_Transaction(vds):
+def parse_Transaction(vds, has_nTime=False):
   d = {}
   start_pos = vds.read_cursor
   d['version'] = vds.read_int32()
+  if has_nTime:
+    d['nTime'] = vds.read_uint32()
   n_vin = vds.read_compact_size()
   d['txIn'] = []
   for i in xrange(n_vin):
@@ -244,22 +246,38 @@ def script_GetOp(bytes):
     if opcode <= opcodes.OP_PUSHDATA4:
       nSize = opcode
       if opcode == opcodes.OP_PUSHDATA1:
-        nSize = ord(bytes[i])
-        i += 1
+        if i + 1 > len(bytes):
+          vch = "_INVALID_NULL"
+          i = len(bytes)
+        else:
+          nSize = ord(bytes[i])
+          i += 1
       elif opcode == opcodes.OP_PUSHDATA2:
-        (nSize,) = struct.unpack_from('<H', bytes, i)
-        i += 2
+        if i + 2 > len(bytes):
+          vch = "_INVALID_NULL"
+          i = len(bytes)
+        else:
+          (nSize,) = struct.unpack_from('<H', bytes, i)
+          i += 2
       elif opcode == opcodes.OP_PUSHDATA4:
-        (nSize,) = struct.unpack_from('<I', bytes, i)
-        i += 4
+        if i + 4 > len(bytes):
+          vch = "_INVALID_NULL"
+          i = len(bytes)
+        else:
+          (nSize,) = struct.unpack_from('<I', bytes, i)
+          i += 4
       if i+nSize > len(bytes):
         vch = "_INVALID_"+bytes[i:]
         i = len(bytes)
       else:
         vch = bytes[i:i+nSize]
         i += nSize
+    elif opcodes.OP_1 <= opcode <= opcodes.OP_16:
+      vch = chr(opcode - opcodes.OP_1 + 1)
+    elif opcode == opcodes.OP_1NEGATE:
+      vch = chr(255)
 
-    yield (opcode, vch, i)
+    yield (opcode, vch)
 
 def script_GetOpName(opcode):
   try:
@@ -269,7 +287,7 @@ def script_GetOpName(opcode):
 
 def decode_script(bytes):
   result = ''
-  for (opcode, vch, i) in script_GetOp(bytes):
+  for (opcode, vch) in script_GetOp(bytes):
     if len(result) > 0: result += " "
     if opcode <= opcodes.OP_PUSHDATA4:
       result += "%d:"%(opcode,)
@@ -314,11 +332,10 @@ def extract_public_key(bytes, version='\x00'):
     return hash_160_to_bc_address(decoded[2][1], version=version)
 
   # BIP11 TxOuts look like one of these:
-  # Note that match_decoded is dumb, so OP_1 actually matches OP_1/2/3/etc:
   multisigs = [
-    [ opcodes.OP_1, opcodes.OP_PUSHDATA4, opcodes.OP_1, opcodes.OP_CHECKMULTISIG ],
-    [ opcodes.OP_2, opcodes.OP_PUSHDATA4, opcodes.OP_PUSHDATA4, opcodes.OP_2, opcodes.OP_CHECKMULTISIG ],
-    [ opcodes.OP_3, opcodes.OP_PUSHDATA4, opcodes.OP_PUSHDATA4, opcodes.OP_3, opcodes.OP_CHECKMULTISIG ]
+    [ opcodes.OP_PUSHDATA4, opcodes.OP_PUSHDATA4, opcodes.OP_1, opcodes.OP_CHECKMULTISIG ],
+    [ opcodes.OP_PUSHDATA4, opcodes.OP_PUSHDATA4, opcodes.OP_PUSHDATA4, opcodes.OP_2, opcodes.OP_CHECKMULTISIG ],
+    [ opcodes.OP_PUSHDATA4, opcodes.OP_PUSHDATA4, opcodes.OP_PUSHDATA4, opcodes.OP_PUSHDATA4, opcodes.OP_3, opcodes.OP_CHECKMULTISIG ]
   ]
   for match in multisigs:
     if match_decoded(decoded, match):

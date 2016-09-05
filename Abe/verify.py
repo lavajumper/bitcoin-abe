@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # Prototype database validation script.  Same args as abe.py.
 
-# Copyright(C) 2011 by Abe developers.
+# Copyright(C) 2011,2014 by Abe developers.
 
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
@@ -21,9 +21,8 @@ import sys
 import DataStore
 import util
 import logging
-import readconf
 
-def verify_tx_merkle_hashes(store, logger, chain_id):
+def verify_tx_merkle_hashes(store, logger, chain_id, chain):
     checked, bad = 0, 0
     for block_id, merkle_root, num_tx in store.selectall("""
         SELECT b.block_id, b.block_hashMerkleRoot, b.block_num_tx
@@ -42,7 +41,7 @@ def verify_tx_merkle_hashes(store, logger, chain_id):
         if len(tree) != num_tx:
             logger.warning("block %d: block_num_tx=%d but found %d",
                            block_id, num_tx, len(tree))
-        root = util.merkle(tree) or DataStore.NULL_HASH
+        root = chain.merkle_root(tree) or util.NULL_HASH
         if root != merkle_root:
             logger.error("block %d: block_hashMerkleRoot mismatch.",
                          block_id)
@@ -55,19 +54,21 @@ def verify_tx_merkle_hashes(store, logger, chain_id):
     return checked, bad
 
 def main(argv):
-    logging.basicConfig(level=logging.DEBUG)
-    args, argv = readconf.parse_argv(argv, DataStore.CONFIG_DEFAULTS,
-                                     strict=False)
-    if argv and argv[0] in ('-h', '--help'):
-        print "Usage: verify.py --dbtype=MODULE --connect-args=ARGS"
+    cmdline = util.CmdLine(argv)
+    cmdline.usage = lambda: \
+        "Usage: verify.py --dbtype=MODULE --connect-args=ARGS"
+
+    store, argv = cmdline.init()
+    if store is None:
         return 0
-    store = DataStore.new(args)
+
     logger = logging.getLogger("verify")
     checked, bad = 0, 0
     for (chain_id,) in store.selectall("""
         SELECT chain_id FROM chain"""):
         logger.info("checking chain %d", chain_id)
-        checked1, bad1 = verify_tx_merkle_hashes(store, logger, chain_id)
+        chain = store.chains_by.id[chain_id]
+        checked1, bad1 = verify_tx_merkle_hashes(store, logger, chain_id, chain)
         checked += checked1
         bad += bad1
     logger.info("All chains: %d Merkle trees, %d bad", checked, bad)

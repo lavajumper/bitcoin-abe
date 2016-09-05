@@ -61,7 +61,7 @@ try:
   # Needed for RIPEMD160 hash function, used to compute
   # Bitcoin addresses from internal public keys.
   import Crypto.Hash.SHA256 as SHA256
-  import Crypto.Hash.RIPEMD160 as RIPEMD160
+  import Crypto.Hash.RIPEMD as RIPEMD160
   have_crypto = True
 except ImportError:
   have_crypto = False
@@ -73,16 +73,16 @@ def hash_160(public_key):
   h2 = RIPEMD160.new(h1).digest()
   return h2
 
-def public_key_to_bc_address(public_key):
-  if not have_crypto:
+def public_key_to_bc_address(public_key, version="\x00"):
+  if not have_crypto or public_key is None:
     return ''
   h160 = hash_160(public_key)
-  return hash_160_to_bc_address(h160)
+  return hash_160_to_bc_address(h160, version=version)
 
-def hash_160_to_bc_address(h160):
+def hash_160_to_bc_address(h160, version="\x00"):
   if not have_crypto:
     return ''
-  vh160 = "\x00"+h160  # \x00 is version 0
+  vh160 = version+h160
   h3=SHA256.new(SHA256.new(vh160).digest()).digest()
   addr=vh160+h3[0:4]
   return b58encode(addr)

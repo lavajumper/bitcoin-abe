@@ -12,9 +12,9 @@ This software reads the Bitcoin block file, transforms and loads the
 data into a database, and presents a web interface similar to Bitcoin
 Block Explorer, http://blockexplorer.com/.
 
-Abe draws inspiration from Bitcoin Block Explorer (BBE) and seeks some
-level of compatibility with it but uses a completely new
-implementation.
+Abe draws inspiration from Bitcoin Block Explorer (BBE) and
+BlockChain.info and seeks some level of compatibility with them but
+uses a completely new implementation.
 
 Installation
 ------------
@@ -23,7 +23,18 @@ Issue:
 
     python setup.py install
 
-or simply run Abe from the directory containing setup.py.
+This will install abe to your system. After you set up the config file and
+database (see below and README-<DB>.txt) you can run:
+
+    python -m Abe.abe --config myconf.conf --commit-bytes 100000 --no-serve
+    
+This will perform the initial data load and will take a long time.
+After it's fully synced, you can run the web server with: 
+
+    python -m Abe.abe --config myconf.conf
+    
+To really get everything right see the README file for your type of
+database.
 
 Abe depends on Python 2.7 (or 2.6), the pycrypto package, and an SQL
 database supporting ROLLBACK.  Abe runs on PostgreSQL, MySQL's InnoDB
@@ -39,6 +50,18 @@ let Abe read the block files while Bitcoin runs, assuming Bitcoin only
 appends to the file.  Prior to Bitcoin v0.8, this assumption seemed
 safe.  Abe may need some fixes to avoid skipping blocks while current
 and future Bitcoin versions run.
+
+NovaCoin and CryptoCash support depends on the ltc_scrypt module
+available from https://github.com/CryptoManiac/bitcoin-abe (see
+README-SCRYPT.txt).
+
+Hirocoin (and any other X11) support depends on the xcoin_hash module
+available from https://github.com/evan82/xcoin-hash.
+
+Bitleu (a Scrypt-Jane coin) depends on the yac_scrypt module.
+
+Copperlark (a Keccak coin) depends on the sha3 module available via
+"easy_install pysha3".
 
 License
 -------
@@ -113,13 +136,11 @@ and network interface in abe.conf, e.g.:
 Input
 -----
 
-To display Namecoin or any block chain with data somewhere other than
-the default Bitcoin directory, specify "datadir" in abe.conf, e.g.:
+To display Namecoin, NovaCoin, or any block chain with data somewhere
+other than the default Bitcoin directory, specify "datadir" in
+abe.conf, e.g.:
 
     datadir = /home/bitcoin/.namecoin
-
-Note that the web interface is currently unaware of name transactions,
-but see namecoin_dump.py in the tools directory.
 
 The datadir directive can include a new chain's basic configuration,
 e.g.:
@@ -133,6 +154,9 @@ e.g.:
 Note that "+=" adds to the existing datadir configuration, while "="
 replaces it.  For help with address_version, please open doc/FAQ.html
 in a web browser.
+
+The web interface is currently unaware of name transactions, but see
+namecoin_dump.py in the tools directory.
 
 More information
 ----------------

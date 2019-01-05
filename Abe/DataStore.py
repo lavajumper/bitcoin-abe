@@ -86,6 +86,7 @@ CHAIN_CONFIG = [
     {"chain":"Dash"},
     {"chain":"BlackCoin"},
     {"chain":"Unbreakablecoin"},
+    {"chain":"Californium"},
     #{"chain":"",
     # "code3":"", "address_version":"\x", "magic":""},
     ]
@@ -95,10 +96,9 @@ NULL_PUBKEY_ID = 0
 PUBKEY_ID_NETWORK_FEE = NULL_PUBKEY_ID
 
 # Size of the script and pubkey columns in bytes.
-MAX_SCRIPT = 1000000
-MAX_PUBKEY = 65
-
-NO_CLOB = 'BUG_NO_CLOB'
+MAX_SCRIPT = SqlAbstraction.MAX_SCRIPT
+MAX_PUBKEY = SqlAbstraction.MAX_PUBKEY
+NO_CLOB = SqlAbstraction.NO_CLOB
 
 # XXX This belongs in another module.
 class InvalidBlock(Exception):
@@ -963,8 +963,8 @@ store._ddl['txout_approx'],
         store.save_configvar(name)
 
     def cache_block(store, block_id, height, prev_id, search_id):
-        assert isinstance(block_id, int), block_id
-        assert isinstance(height, int), height
+        assert isinstance(block_id, int), repr(block_id)
+        assert isinstance(height, int), repr(height)
         assert prev_id is None or isinstance(prev_id, int)
         assert search_id is None or isinstance(search_id, int)
         block = {
@@ -1247,10 +1247,10 @@ store._ddl['txout_approx'],
 
     def _populate_block_txin(store, block_id):
         # Create rows in block_txin.  In case of duplicate transactions,
-        # choose the one with the lowest block ID.  XXX For consistency,
-        # it should be the lowest height instead of block ID.
-        for row in store.selectall("""
-            SELECT txin.txin_id, MIN(obt.block_id)
+        # choose the one with the lowest block height.
+        txin_oblocks = {}
+        for txin_id, oblock_id in store.selectall("""
+            SELECT txin.txin_id, obt.block_id
               FROM block_tx bt
               JOIN txin ON (txin.tx_id = bt.tx_id)
               JOIN txout ON (txin.txout_id = txout.txout_id)
@@ -1258,13 +1258,20 @@ store._ddl['txout_approx'],
               JOIN block ob ON (obt.block_id = ob.block_id)
              WHERE bt.block_id = ?
                AND ob.block_chain_work IS NOT NULL
-             GROUP BY txin.txin_id""", (block_id,)):
-            (txin_id, oblock_id) = row
-            if store.is_descended_from(block_id, int(oblock_id)):
-                store.sql("""
-                    INSERT INTO block_txin (block_id, txin_id, out_block_id)
-                    VALUES (?, ?, ?)""",
-                          (block_id, txin_id, oblock_id))
+          ORDER BY txin.txin_id ASC, ob.block_height ASC""", (block_id,)):
+
+            # Save all candidate, lowest height might not be a descendant if
+            # we have multiple block candidates
+            txin_oblocks.setdefault(txin_id, []).append(oblock_id)
+
+        for txin_id, oblock_ids in txin_oblocks.iteritems():
+            for oblock_id in oblock_ids:
+                if store.is_descended_from(block_id, int(oblock_id)):
+                    # Store lowest block height that is descended from our block
+                    store.sql("""
+                        INSERT INTO block_txin (block_id, txin_id, out_block_id)
+                        VALUES (?, ?, ?)""", (block_id, txin_id, oblock_id))
+                    break
 
     def _has_unlinked_txins(store, block_id):
         (unlinked_count,) = store.selectrow("""
@@ -1278,16 +1285,19 @@ store._ddl['txout_approx'],
     def _get_block_ss_destroyed(store, block_id, nTime, tx_ids):
         block_ss_destroyed = 0
         for tx_id in tx_ids:
-            destroyed = int(store.selectrow("""
-                SELECT COALESCE(SUM(txout_approx.txout_approx_value *
-                                    (? - b.block_nTime)), 0)
+            destroyed = 0
+            # Don't do the math in SQL as we risk losing precision
+            for txout_value, block_nTime in store.selectall("""
+                SELECT COALESCE(txout_approx.txout_approx_value, 0),
+                       b.block_nTime
                   FROM block_txin bti
                   JOIN txin ON (bti.txin_id = txin.txin_id)
                   JOIN txout_approx ON (txin.txout_id = txout_approx.txout_id)
                   JOIN block_tx obt ON (txout_approx.tx_id = obt.tx_id)
                   JOIN block b ON (obt.block_id = b.block_id)
                  WHERE bti.block_id = ? AND txin.tx_id = ?""",
-                                            (nTime, block_id, tx_id))[0])
+                                            (block_id, tx_id)):
+                destroyed += txout_value * (nTime - block_nTime)
             block_ss_destroyed += destroyed
         return block_ss_destroyed
 
@@ -1766,10 +1776,12 @@ store._ddl['txout_approx'],
         return b
 
     def tx_find_id_and_value(store, tx, is_coinbase, check_only=False):
+        # Attention: value_out/undestroyed much match what is calculated in
+        # import_tx
         row = store.selectrow("""
             SELECT tx.tx_id, SUM(txout.txout_value), SUM(
-                       CASE WHEN txout.pubkey_id > 0 THEN txout.txout_value
-                            ELSE 0 END)
+              CASE WHEN txout.pubkey_id IS NOT NULL AND txout.pubkey_id <= 0
+                   THEN 0 ELSE txout.txout_value END)
               FROM tx
               LEFT JOIN txout ON (tx.tx_id = txout.tx_id)
              WHERE tx_hash = ?
@@ -1810,8 +1822,9 @@ store._ddl['txout_approx'],
             VALUES (?, ?, ?, ?, ?)""",
                   (tx_id, dbhash, store.intin(tx['version']),
                    store.intin(tx['lockTime']), tx['size']))
-        # Always consider tx are unlinked until they are added to block_tx. This is necessary as
-        # inserted tx can get committed to database before the block itself
+        # Always consider tx are unlinked until they are added to block_tx.
+        # This is necessary as inserted tx can get committed to database
+        # before the block itself
         store.sql("INSERT INTO unlinked_tx (tx_id) VALUES (?)", (tx_id,))
 
         # Import transaction outputs.
@@ -1823,6 +1836,8 @@ store._ddl['txout_approx'],
             txout_id = store.new_id("txout")
 
             pubkey_id = store.script_to_pubkey_id(chain, txout['scriptPubKey'])
+            # Attention: much match how tx_find_id_and_value gets undestroyed
+            # value
             if pubkey_id is not None and pubkey_id <= 0:
                 tx['value_destroyed'] += txout['value']
 
@@ -2558,9 +2573,9 @@ store._ddl['txout_approx'],
     def catch_up_rpc(store, dircfg):
         """
         Load new blocks using RPC.  Requires running *coind supporting
-        getblockhash, getblock, and getrawtransaction.  Bitcoind v0.8
-        requires the txindex configuration option.  Requires chain_id
-        in the datadir table.
+        getblockhash, getblock with verbose=false, and optionally
+        getrawmempool/getrawtransaction (to load mempool tx). Requires
+        chain_id in the datadir table.
         """
         chain_id = dircfg['chain_id']
         if chain_id is None:
@@ -2586,6 +2601,15 @@ store._ddl['txout_approx'],
         rpcport     = conf.get("rpcport", chain.datadir_rpcport)
         url = "http://" + rpcuser + ":" + rpcpassword + "@" + rpcconnect \
             + ":" + str(rpcport)
+        ds = BCDataStream.BCDataStream()
+
+        if store.rpc_load_mempool:
+            # Cache tx imported from mempool, so we can avoid querying DB on each pass
+            rows = store.selectall("""
+                SELECT t.tx_hash
+                 FROM unlinked_tx ut
+                 JOIN tx t ON (ut.tx_id = t.tx_id)""")
+            store.mempool_tx = {store.hashout_hex(i[0]) for i in rows}
 
         def rpc(func, *params):
             store.rpclog.info("RPC>> %s %s", func, params)
@@ -2664,15 +2688,16 @@ store._ddl['txout_approx'],
             return (height, next_hash)
 
         def catch_up_mempool(height):
-            # imported tx cache, so we can avoid querying DB on each pass
-            imported_tx = set()
             # Next height check time
             height_chk = time.time() + 1
 
             while store.rpc_load_mempool:
                 # Import the memory pool.
-                for rpc_tx_hash in rpc("getrawmempool"):
-                    if rpc_tx_hash in imported_tx:
+                mempool = rpc("getrawmempool")
+
+                for rpc_tx_hash in mempool:
+                    # Skip any TX imported from previous run
+                    if rpc_tx_hash in store.mempool_tx:
                         continue
 
                     # Break loop if new block found
@@ -2695,9 +2720,12 @@ store._ddl['txout_approx'],
                         tx_id = store.import_tx(tx, False, chain)
                         store.log.info("mempool tx %d", tx_id)
                         store.imported_bytes(tx['size'])
-                    imported_tx.add(rpc_tx_hash)
 
-                store.clean_unlinked_tx(imported_tx)
+                # Only need to reset+save mempool tx cache once at the end
+                store.mempool_tx = set(mempool)
+
+                # Clean all unlinked tx not still in mempool
+                store.clean_unlinked_tx(store.mempool_tx)
                 store.log.info("mempool load completed, starting over...")
                 time.sleep(3)
             return None
@@ -2728,46 +2756,22 @@ store._ddl['txout_approx'],
                 if store.offer_existing_block(hash, chain.id):
                     rpc_hash = get_blockhash(height + 1)
                 else:
-                    rpc_block = rpc("getblock", rpc_hash)
-                    assert rpc_hash == rpc_block['hash']
+                    # get full RPC block with "getblock <hash> False"
+                    ds.write(rpc("getblock", rpc_hash, False).decode('hex'))
+                    block_hash = chain.ds_block_header_hash(ds)
+                    block = chain.ds_parse_block(ds)
+                    assert hash == block_hash
+                    block['hash'] = block_hash
 
-                    prev_hash = \
-                        rpc_block['previousblockhash'].decode('hex')[::-1] \
-                        if 'previousblockhash' in rpc_block \
-                        else chain.genesis_hash_prev
-
-                    block = {
-                        'hash':     hash,
-                        'version':  int(rpc_block['version']),
-                        'hashPrev': prev_hash,
-                        'hashMerkleRoot':
-                            rpc_block['merkleroot'].decode('hex')[::-1],
-                        'nTime':    int(rpc_block['time']),
-                        'nBits':    int(rpc_block['bits'], 16),
-                        'nNonce':   int(rpc_block['nonce']),
-                        'transactions': [],
-                        'size':     int(rpc_block['size']),
-                        'height':   height,
-                        }
-
+                    # XXX Shouldn't be needed since we deserialize a valid block already
                     if chain.block_header_hash(chain.serialize_block_header(
                             block)) != hash:
                         raise InvalidBlock('block hash mismatch')
 
-                    for rpc_tx_hash in rpc_block['tx']:
-                        tx = store.export_tx(tx_hash = str(rpc_tx_hash),
-                                             format = "binary")
-                        if tx is None:
-                            tx = get_tx(rpc_tx_hash)
-                            if tx is None:
-                                store.log.error("RPC service lacks full txindex")
-                                return False
-
-                        block['transactions'].append(tx)
-
                     store.import_block(block, chain = chain)
-                    store.imported_bytes(block['size'])
-                    rpc_hash = rpc_block.get('nextblockhash')
+                    store.imported_bytes(ds.read_cursor)
+                    ds.clear()
+                    rpc_hash = get_blockhash(height + 1)
 
                 height += 1
                 if rpc_hash is None:
@@ -3383,40 +3387,40 @@ store._ddl['txout_approx'],
         # Clean up txin's
         unlinked_txins = store.selectall("""
             SELECT txin_id FROM txin
-            WHERE tx_id = ?""", tx_id)
+            WHERE tx_id = ?""", (tx_id,))
         for txin_id in unlinked_txins:
-            store.sql("DELETE FROM unlinked_txin WHERE txin_id = ?", txin_id)
-        store.sql("DELETE FROM txin WHERE tx_id = ?", tx_id)
+            store.sql("DELETE FROM unlinked_txin WHERE txin_id = ?", (txin_id,))
+        store.sql("DELETE FROM txin WHERE tx_id = ?", (tx_id,))
 
         # Clean up txouts & associated pupkeys ...
         txout_pubkeys = set(store.selectall("""
             SELECT pubkey_id FROM txout
-            WHERE tx_id = ? AND pubkey_id IS NOT NULL""", tx_id))
+            WHERE tx_id = ? AND pubkey_id IS NOT NULL""", (tx_id,)))
         # Also add multisig pubkeys if any
         msig_pubkeys = set()
         for pk_id in txout_pubkeys:
             msig_pubkeys.update(store.selectall("""
                 SELECT pubkey_id FROM multisig_pubkey
-                WHERE multisig_id = ?""", pk_id))
+                WHERE multisig_id = ?""", (pk_id,)))
 
-        store.sql("DELETE FROM txout WHERE tx_id = ?", tx_id)
+        store.sql("DELETE FROM txout WHERE tx_id = ?", (tx_id,))
 
         # Now delete orphan pubkeys... For simplicity merge both sets together
         for pk_id in txout_pubkeys.union(msig_pubkeys):
             (count,) = store.selectrow("""
                 SELECT COUNT(pubkey_id) FROM txout
-                WHERE pubkey_id = ?""", pk_id)
+                WHERE pubkey_id = ?""", (pk_id,))
             if count == 0:
-                store.sql("DELETE FROM multisig_pubkey WHERE multisig_id = ?", pk_id)
+                store.sql("DELETE FROM multisig_pubkey WHERE multisig_id = ?", (pk_id,))
                 (count,) = store.selectrow("""
                     SELECT COUNT(pubkey_id) FROM multisig_pubkey
-                    WHERE pubkey_id = ?""", pk_id)
+                    WHERE pubkey_id = ?""", (pk_id,))
                 if count == 0:
-                    store.sql("DELETE FROM pubkey WHERE pubkey_id = ?", pk_id)
+                    store.sql("DELETE FROM pubkey WHERE pubkey_id = ?", (pk_id,))
 
         # Finally clean up tx itself
-        store.sql("DELETE FROM unlinked_tx WHERE tx_id = ?", tx_id)
-        store.sql("DELETE FROM tx WHERE tx_id = ?", tx_id)
+        store.sql("DELETE FROM unlinked_tx WHERE tx_id = ?", (tx_id,))
+        store.sql("DELETE FROM tx WHERE tx_id = ?", (tx_id,))
 
 
 def new(args):

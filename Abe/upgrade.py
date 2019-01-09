@@ -960,7 +960,7 @@ def insert_chain_novacoin(store):
 def txin_detail_multisig(store):
     store.get_db().drop_view_if_exists('txin_detail')
     store.ddl("""
-        CREATE VIEW txin_detail AS SELECT
+        CREATE OR REPLACE VIEW txin_detail AS SELECT
             cc.chain_id,
             cc.in_longest,
             cc.block_id,

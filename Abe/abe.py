@@ -31,12 +31,13 @@ import json
 import version
 import DataStore
 import readconf
-
+import time
 # bitcointools -- modified deserialize.py to return raw transaction
 import deserialize
 import util  # Added functions.
 import base58
 
+import RpcCom
 __version__ = version.__version__
 
 ABE_APPNAME = "Abe"
@@ -49,6 +50,7 @@ COPYRIGHT_URL = 'https://github.com/bitcoin-abe'
 
 DONATIONS_BTC = '1PWC7PNHL1SgvZaN7xEtygenKjWobWsCuf'
 DONATIONS_NMC = 'NJ3MSELK1cWnqUa6xhF2wUYAnz3RSrWXcK'
+DONATIONS_SXC = 'S7NgcaY5qtjsBpNqdJsYbeTjacwuCUhC2Z'
 
 TIME1970 = time.strptime('1970-01-01','%Y-%m-%d')
 EPOCH1970 = calendar.timegm(TIME1970)
@@ -62,15 +64,21 @@ DEFAULT_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <link rel="stylesheet" type="text/css"
-     href="%(dotdot)s%(STATIC_PATH)sabe.css" />
     <link rel="shortcut icon" href="%(dotdot)s%(STATIC_PATH)sfavicon.ico" />
+    <link href="//netdna.bootstrapcdn.com/bootstrap/3.1.0/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" type="text/css"
+     href="%(dotdot)s%(STATIC_PATH)ssextheme.css" />
+     
+    
+    <link href='http://fonts.googleapis.com/css?family=Oxygen:400,700,300&subset=latin,latin-ext' rel='stylesheet' type='text/css'>
     <title>%(title)s</title>
 </head>
 <body>
+    <div class="container">
     <h1><a href="%(dotdot)s%(HOMEPAGE)s"><img
-     src="%(dotdot)s%(STATIC_PATH)slogo32.png" alt="Abe logo" /></a> %(h1)s
+     src="%(dotdot)s%(STATIC_PATH)slogo32.png" alt="Logo" /></a> %(h1)s
     </h1>
+    <div class="statbar">%(statpanel)s</div>
     %(body)s
     <p><a href="%(dotdot)sq">API</a> (machine-readable pages)</p>
     <p style="font-size: smaller">
@@ -79,9 +87,10 @@ DEFAULT_TEMPLATE = """
         </span>
         %(download)s
         Tips appreciated!
-        <a href="%(dotdot)saddress/%(DONATIONS_BTC)s">BTC</a>
-        <a href="%(dotdot)saddress/%(DONATIONS_NMC)s">NMC</a>
+        <a href="%(dotdot)saddress/%(DONATIONS_BTC)s">SXC</a>
+        <a href="%(dotdot)saddress/%(DONATIONS_NMC)s">LTC</a>
     </p>
+    </div>
 </body>
 </html>
 """
@@ -214,6 +223,7 @@ class Abe:
         page = {
             "status": '200 OK',
             "title": [escape(ABE_APPNAME), " ", ABE_VERSION],
+            "statpanel": [],          
             "body": [],
             "env": env,
             "params": {},
@@ -230,6 +240,7 @@ class Abe:
             abe.log.debug("fixed path_info")
             return redirect(page)
 
+        page['statpanel'] = ['<div> stats </div>']
         cmd = wsgiref.util.shift_path_info(env)
         handler = abe.get_handler(cmd)
 
@@ -277,6 +288,7 @@ class Abe:
         if abe.args.auto_agpl:
             tvars['download'] = (
                 ' <a href="' + page['dotdot'] + 'download">Source</a>')
+        tvars['statpanel'] = flatten(page['statpanel'])
 
         content = page['template'] % tvars
         if isinstance(content, unicode):
@@ -291,7 +303,7 @@ class Abe:
         body = page['body']
         body += [
             abe.search_form(page),
-            '<table>\n',
+            '<table class="table table-hover>\n',
             '<tr><th>Currency</th><th>Code</th><th>Block</th><th>Time</th>',
             '<th>Started</th><th>Age (days)</th><th>Coins Created</th>',
             '<th>Avg Coin Age</th><th>',
@@ -493,7 +505,7 @@ class Abe:
         extra = False
         #extra = True
         body += ['<p>', nav, '</p>\n',
-                 '<table><tr><th>Block</th><th>Approx. Time</th>',
+                 '<table class="table table-hover"><tr><th>Block</th><th>Approx. Time</th>',
                  '<th>Transactions</th><th>Value Out</th>',
                  '<th>Difficulty</th><th>Outstanding</th>',
                  '<th>Average Age</th><th>Chain Age</th>',
@@ -541,7 +553,7 @@ class Abe:
                 '</td></tr>\n']
 
         body += ['</table>\n<p>', nav, '</p>\n']
-
+        abe.update_statpanel(page, chain)
     def _show_block(abe, page, dotdotblock, chain, **kwargs):
         body = page['body']
 
@@ -622,7 +634,7 @@ class Abe:
              (100 * (1 - float(b['satoshi_seconds']) / b['chain_satoshi_seconds']),)]
             if b['chain_satoshi_seconds'] else '',
 
-            ['sat=',b['chain_satoshis'],';sec=',seconds,';ss=',b['satoshi_seconds'],
+            ['sat=',b['chain_satoshis'],';sec=0;ss=',b['satoshi_seconds'],
              ';total_ss=',b['chain_satoshi_seconds'],';destroyed=',b['satoshis_destroyed']]
             if abe.debug else '',
 
@@ -630,7 +642,7 @@ class Abe:
 
         body += ['<h3>Transactions</h3>\n']
 
-        body += ['<table><tr><th>Transaction</th><th>Fee</th>'
+        body += ['<table class="table table-hover"><tr><th>Transaction</th><th>Fee</th>'
                  '<th>Size (kB)</th><th>From (amount)</th><th>To (amount)</th>'
                  '</tr>\n']
 
@@ -669,6 +681,7 @@ class Abe:
 
             body += ['</td></tr>\n']
         body += '</table>\n'
+        abe.update_statpanel(page,chain)
 
     def handle_block(abe, page):
         block_hash = wsgiref.util.shift_path_info(page['env'])
@@ -771,7 +784,7 @@ class Abe:
             '<br />\n',
             '<a href="../rawtx/', tx['hash'], '">Raw transaction</a><br />\n']
         body += ['</p>\n',
-                 '<a name="inputs"><h3>Inputs</h3></a>\n<table>\n',
+                 '<a name="inputs"><h3>Inputs</h3></a>\n<table class="table table-hover">\n',
                  '<tr><th>Index</th><th>Previous output</th><th>Amount</th>',
                  '<th>From address</th>']
         if abe.store.keep_scriptsig:
@@ -781,14 +794,14 @@ class Abe:
             row_to_html(txin, 'i', 'o',
                         'Generation' if is_coinbase else 'Unknown')
         body += ['</table>\n',
-                 '<a name="outputs"><h3>Outputs</h3></a>\n<table>\n',
+                 '<a name="outputs"><h3>Outputs</h3></a>\n<table class="table table-hover">\n',
                  '<tr><th>Index</th><th>Redeemed at input</th><th>Amount</th>',
                  '<th>To address</th><th>ScriptPubKey</th></tr>\n']
         for txout in tx['out']:
             row_to_html(txout, 'o', 'i', 'Not yet redeemed')
 
         body += ['</table>\n']
-
+        abe.update_statpanel(page,chain)
     def handle_rawtx(abe, page):
         abe.do_raw(page, abe.do_rawtx)
 
@@ -927,7 +940,7 @@ class Abe:
                      '</td><td class="currency">', escape(chain.code3),
                      '</td></tr>\n']
         body += ['</table>\n']
-
+        abe.update_statpanel(page,chain)
     def search_form(abe, page):
         q = (page['params'].get('q') or [''])[0]
         return [
@@ -1121,6 +1134,37 @@ class Abe:
         """, (q.upper(), q.upper())))
         return ret
 
+    def update_statpanel(abe, page, chain):
+        
+        rows = abe.store.selectall("""
+            SELECT block_height, block_ntime,block_nbits from block where block_id = (SELECT chain_last_block_id from chain where chain_id=19)
+            """)
+        for row in rows:
+            height, nTime, nBits = row
+            nTime            = float(nTime)
+            nBits            = int(nBits)
+            target           = util.calculate_target(nBits)
+            difficulty       = util.target_to_difficulty(target)
+            work             = util.target_to_work(target)
+        
+        rpccom = RpcCom.new(chain)
+        hashes = rpccom.request("getnetworkhashps")
+        
+        page['statpanel'] = [
+            '<div class="panel panel-default statbar-box">',
+              '<center class="panel-heading">Current Difficulty</center>',
+              '<center class="panel-body">',difficulty,'</center>',
+            '</div>',
+            '<div class="panel panel-default statbar-box">',
+              '<center class="panel-heading">Last Block Time</center>',
+              '<center class="panel-body">',time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(nTime)),'</center>',
+            '</div>',
+            '<div class="panel panel-default statbar-box">',
+              '<center class="panel-heading">Network Hashrate</center>',
+              '<center class="panel-body">',hashes,'</center>',
+            '</div>',
+            ]    
+    
     def handle_t(abe, page):
         abe.show_search_results(
             page,

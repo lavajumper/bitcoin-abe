@@ -1149,6 +1149,7 @@ class Abe:
         
         rpccom = RpcCom.new(chain)
         hashes = rpccom.request("getnetworkhashps")
+        hps = float(hashes)/1000000000
         
         page['statpanel'] = [
             '<div class="panel panel-default statbar-box">',
@@ -1161,7 +1162,7 @@ class Abe:
             '</div>',
             '<div class="panel panel-default statbar-box">',
               '<center class="panel-heading">Network Hashrate</center>',
-              '<center class="panel-body">',hashes,'</center>',
+              '<center class="panel-body">',"{:.3f}".format(hps),' Gh/s</center>',
             '</div>',
             ]    
     
